@@ -3,6 +3,7 @@ import datetime
 import pytest
 
 from dwdparse.parsers import (
+    BiowetterParser,
     CAPParser,
     CloudCoverObservationsParser,
     CurrentObservationsParser,
@@ -18,6 +19,8 @@ from dwdparse.parsers import (
     SYNOPParser,
     TemperatureObservationsParser,
     TenMinutesObservationsParser,
+    ThermalHazardParser,
+    UVIndexParser,
     VisibilityObservationsParser,
     WindGustsObservationsParser,
     WindObservationsParser,
@@ -569,6 +572,87 @@ def test_pollen_parser(data_dir):
         and r['date'] == datetime.date(2026, 7, 15)]
 
 
+def test_biowetter_parser(data_dir):
+    p = BiowetterParser()
+    records = list(p.parse(data_dir / 'biowetter.json'))
+    # 2 zones x 5 periods (no today_morning — published late morning)
+    assert len(records) == 10
+    first = next(
+        r for r in records
+        if r['zone_id'] == 'E' and r['date'] == datetime.date(2026, 7, 13))
+    assert first['period'] == 'afternoon'
+    assert first['zone_name'] == (
+        'Berlin, Brandenburg und im nördlichen Sachsen-Anhalt')
+    assert first['weather_class'] == '5-0-w3'
+    assert len(first['effects']) == 7
+    assert first['effects'][0]['name'] == (
+        'Wettereinfluss auf das allgemeine Befinden')
+    assert first['effects'][0]['value'] == 'hohe Gefährdung'
+    assert len(first['recommendations']) == 4
+    # 11:00 Europe/Berlin (CEST) is 09:00 UTC; 'author' becomes 'sender'
+    assert first['last_update'] == datetime.datetime(
+        2026, 7, 13, 9, 0, tzinfo=utc)
+    assert first['sender'] == 'Medizin-Meteorologie'
+    assert {(str(r['date']), r['period']) for r in records} == {
+        ('2026-07-13', 'afternoon'),
+        ('2026-07-14', 'morning'),
+        ('2026-07-14', 'afternoon'),
+        ('2026-07-15', 'morning'),
+        ('2026-07-15', 'afternoon'),
+    }
+
+
+def test_uv_index_parser(data_dir):
+    p = UVIndexParser()
+    records = list(p.parse(data_dir / 'uvi.json'))
+    # 3 cities x 3 days
+    assert len(records) == 9
+    first = next(
+        r for r in records
+        if r['city'] == 'Berlin' and r['date'] == datetime.date(2026, 7, 13))
+    assert first == {
+        'city': 'Berlin',
+        'date': datetime.date(2026, 7, 13),
+        'uv_index': 5,
+        # 07:30 Europe/Berlin (CEST) is 05:30 UTC
+        'last_update': datetime.datetime(2026, 7, 13, 5, 30, tzinfo=utc),
+        'next_update': datetime.datetime(2026, 7, 14, 5, 30, tzinfo=utc),
+        'sender': 'Deutscher Wetterdienst - Medizin-Meteorologie',
+    }
+    zugspitze = {
+        (str(r['date']), r['uv_index'])
+        for r in records if r['city'] == 'Zugspitze'
+    }
+    assert zugspitze == {
+        ('2026-07-13', 9), ('2026-07-14', 6), ('2026-07-15', 5),
+    }
+
+
+def test_thermal_hazard_parser(data_dir):
+    p = ThermalHazardParser()
+    records = list(p.parse(data_dir / 'gt.json'))
+    # 2 cities x 13 slots (4 times x 3 days + after_threedays_03MEZ)
+    assert len(records) == 26
+    berlin = [r for r in records if r['city'] == 'Berlin']
+    # today_15MEZ = 'mittel'; 15:00 MEZ (fixed UTC+1) is 14:00 UTC
+    first = next(
+        r for r in berlin
+        if r['timestamp'] == datetime.datetime(2026, 7, 13, 14, tzinfo=utc))
+    assert first == {
+        'city': 'Berlin',
+        'timestamp': datetime.datetime(2026, 7, 13, 14, tzinfo=utc),
+        'level': 'mittel',
+        'last_update': datetime.datetime(2026, 7, 13, 5, 30, tzinfo=utc),
+        'next_update': datetime.datetime(2026, 7, 14, 5, 30, tzinfo=utc),
+        'sender': 'Deutscher Wetterdienst - Medizin-Meteorologie',
+    }
+    # after_threedays_03MEZ lands on forecast_day + 3 at 02:00 UTC
+    assert any(
+        r['timestamp'] == datetime.datetime(2026, 7, 16, 2, tzinfo=utc)
+        for r in berlin)
+    assert len(berlin) == 13
+
+
 def test_get_parser():
     synop_with_timestamp = (
         'Z__C_EDZW_20200617114802_bda01,synop_bufr_GER_999999_999999__MW_617'
@@ -601,6 +685,9 @@ def test_get_parser():
         synop_latest: None,
         cap_latest: CAPParser,
         's31fg.json': PollenParser,
+        'biowetter.json': BiowetterParser,
+        'gt.json': ThermalHazardParser,
+        'uvi.json': UVIndexParser,
     }
     for filename, expected_parser in expected.items():
         assert get_parser(filename) is expected_parser

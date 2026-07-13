@@ -1137,6 +1137,7 @@ class HealthForecastParser(Parser):
 
     TIMESTAMP_FORMAT = '%Y-%m-%d %H:%M Uhr'
     TIMEZONE = zoneinfo.ZoneInfo('Europe/Berlin')
+    SENDER_KEY = 'sender'
 
     def parse(self, path):
         with open(path, encoding='utf-8') as f:
@@ -1152,7 +1153,7 @@ class HealthForecastParser(Parser):
                 data['last_update']).astimezone(datetime.timezone.utc),
             'next_update': self._parse_local_timestamp(
                 data['next_update']).astimezone(datetime.timezone.utc),
-            'sender': data['sender'],
+            'sender': data[self.SENDER_KEY],
         }
 
     def _parse_local_timestamp(self, value):
@@ -1204,6 +1205,104 @@ class PollenParser(HealthForecastParser):
                 }
 
 
+class BiowetterParser(HealthForecastParser):
+
+    TIMESTAMP_FORMAT = '%Y-%m-%d %H:%M'
+    SENDER_KEY = 'author'
+    PERIOD_KEYS = [
+        'today_afternoon',
+        'tomorrow_morning',
+        'tomorrow_afternoon',
+        'dayafter_to_morning',
+        'dayafter_to_afternoon',
+    ]
+
+    def parse_data(self, data):
+        meta = self.parse_metadata(data)
+        for zone in data['zone']:
+            for period_key in self.PERIOD_KEYS:
+                forecast = zone.get(period_key)
+                if not forecast:
+                    continue
+                yield {
+                    'zone_id': zone['id'],
+                    'zone_name': zone['name'],
+                    'date': datetime.date.fromisoformat(forecast['date']),
+                    'period': period_key.rsplit('_', 1)[1],
+                    'weather_class': forecast['value'],
+                    # DWD effect/recommendation trees are passed through
+                    # unchanged (German names, optional 'subeffect' lists)
+                    'effects': forecast.get('effect'),
+                    'recommendations': forecast.get('recomms'),
+                    **meta,
+                }
+
+
+class UVIndexParser(HealthForecastParser):
+
+    TIMESTAMP_FORMAT = '%Y-%m-%dT%H:%M:%S'
+    DAY_OFFSETS = {
+        'today': 0,
+        'tomorrow': 1,
+        'dayafter_to': 2,
+    }
+
+    def parse_data(self, data):
+        meta = self.parse_metadata(data)
+        base_date = datetime.date.fromisoformat(data['forecast_day'])
+        for entry in data['content']:
+            for day_key, offset in self.DAY_OFFSETS.items():
+                value = entry['forecast'].get(day_key)
+                if value is None:
+                    continue
+                yield {
+                    'city': entry['city'],
+                    'date': base_date + datetime.timedelta(days=offset),
+                    'uv_index': value,
+                    **meta,
+                }
+
+
+class ThermalHazardParser(HealthForecastParser):
+
+    TIMESTAMP_FORMAT = '%Y-%m-%dT%H:%M:%S'
+    DAY_OFFSETS = {
+        'today': 0,
+        'tomorrow': 1,
+        'dayafter_to': 2,
+        'after_threedays': 3,
+    }
+    # Forecast slots are labeled '03MEZ' etc: fixed CET (UTC+1), even
+    # during daylight saving time
+    MEZ = datetime.timezone(datetime.timedelta(hours=1))
+
+    def parse_data(self, data):
+        meta = self.parse_metadata(data)
+        base_date = datetime.date.fromisoformat(data['forecast_day'])
+        for entry in data['content']:
+            for slot_key, value in entry['forecast'].items():
+                if value is None:
+                    continue
+                day_key, _, hour_part = slot_key.rpartition('_')
+                offset = self.DAY_OFFSETS.get(day_key)
+                if offset is None or not hour_part.endswith('MEZ'):
+                    self.logger.warning(
+                        "Skipping unknown forecast slot %r", slot_key)
+                    continue
+                day = base_date + datetime.timedelta(days=offset)
+                timestamp = datetime.datetime(
+                    day.year, day.month, day.day,
+                    int(hour_part[:-3]),
+                    tzinfo=self.MEZ,
+                )
+                yield {
+                    'city': entry['city'],
+                    'timestamp': timestamp.astimezone(datetime.timezone.utc),
+                    'level': value,
+                    **meta,
+                }
+
+
 def get_parser(filename):
     parsers = {
         r'DE1200_RV': RADOLANParser,
@@ -1211,6 +1310,9 @@ def get_parser(filename):
         r'Z__C_EDZW_\d+_.*\.json\.bz2$': SYNOPParser,
         r'Z_CAP_.*\.zip': CAPParser,
         r's31fg\.json$': PollenParser,
+        r'biowetter\.json$': BiowetterParser,
+        r'gt\.json$': ThermalHazardParser,
+        r'uvi\.json$': UVIndexParser,
         r'\w{5}-BEOB\.csv$': CurrentObservationsParser,
         'composite_rv_': RadarParser,
         'stundenwerte_FF_': WindObservationsParser,
