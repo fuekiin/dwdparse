@@ -8,6 +8,7 @@ from dwdparse.parsers import (
     CurrentObservationsParser,
     DewPointObservationsParser,
     MOSMIXParser,
+    PollenParser,
     PrecipitationObservationsParser,
     PressureObservationsParser,
     RadarParser,
@@ -525,6 +526,49 @@ def test_cap_parser_test_status(data_dir):
     assert records[0]['status'] == 'test'
 
 
+def test_pollen_parser(data_dir):
+    p = PollenParser()
+    records = list(p.parse(data_dir / 's31fg.json'))
+    # 2 regions x 8 species x 3 days, minus one '-1' (missing) value
+    assert len(records) == 47
+    first = next(
+        r for r in records
+        if r['region_id'] == 10 and r['species'] == 'graeser'
+        and r['date'] == datetime.date(2026, 7, 13))
+    assert first == {
+        'region_id': 10,
+        'partregion_id': 11,
+        'region_name': 'Schleswig-Holstein und Hamburg',
+        'partregion_name': 'Inseln und Marschen',
+        'species': 'graeser',
+        'date': datetime.date(2026, 7, 13),
+        'index': '1-2',
+        'severity': 1.5,
+        # 11:00 Uhr Europe/Berlin (CEST) is 09:00 UTC
+        'last_update': datetime.datetime(2026, 7, 13, 9, 0, tzinfo=utc),
+        'next_update': datetime.datetime(2026, 7, 14, 9, 0, tzinfo=utc),
+        'sender': 'Deutscher Wetterdienst - Medizin-Meteorologie',
+    }
+    # Empty partregion_name (partregion_id -1) becomes None
+    assert all(
+        r['partregion_name'] is None
+        for r in records if r['region_id'] == 50)
+    # today/tomorrow/dayafter_to resolve to consecutive dates
+    assert {r['date'] for r in records} == {
+        datetime.date(2026, 7, 13),
+        datetime.date(2026, 7, 14),
+        datetime.date(2026, 7, 15),
+    }
+    # All severities follow the index mapping
+    severities = {(r['index'], r['severity']) for r in records}
+    assert severities == {('0', 0.), ('0-1', .5), ('1-2', 1.5)}
+    # '-1' (missing) values are skipped
+    assert not [
+        r for r in records
+        if r['region_id'] == 50 and r['species'] == 'ambrosia'
+        and r['date'] == datetime.date(2026, 7, 15)]
+
+
 def test_get_parser():
     synop_with_timestamp = (
         'Z__C_EDZW_20200617114802_bda01,synop_bufr_GER_999999_999999__MW_617'
@@ -556,6 +600,7 @@ def test_get_parser():
         synop_with_timestamp: SYNOPParser,
         synop_latest: None,
         cap_latest: CAPParser,
+        's31fg.json': PollenParser,
     }
     for filename, expected_parser in expected.items():
         assert get_parser(filename) is expected_parser

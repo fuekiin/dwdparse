@@ -11,6 +11,7 @@ import sys
 import tarfile
 import xml.etree.ElementTree as ET
 import zipfile
+import zoneinfo
 from contextlib import suppress
 
 from dwdparse.stations import (
@@ -1124,12 +1125,92 @@ class CAPParser(Parser):
             )
 
 
+class HealthForecastParser(Parser):
+    """Base for the DWD's health forecast JSON products.
+
+    Covers the shared shape of the files served at
+    opendata.dwd.de/climate_environment/health/alerts/ (pollen,
+    Biowetter, Gefühlte Temperatur): a flat JSON object with
+    'last_update'/'next_update' local-time strings, a 'sender'
+    attribution, and a 'content' list keyed by DWD health regions.
+    """
+
+    TIMESTAMP_FORMAT = '%Y-%m-%d %H:%M Uhr'
+    TIMEZONE = zoneinfo.ZoneInfo('Europe/Berlin')
+
+    def parse(self, path):
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        yield from self.parse_data(data)
+
+    def parse_data(self, data):
+        raise NotImplementedError
+
+    def parse_metadata(self, data):
+        return {
+            'last_update': self._parse_local_timestamp(
+                data['last_update']).astimezone(datetime.timezone.utc),
+            'next_update': self._parse_local_timestamp(
+                data['next_update']).astimezone(datetime.timezone.utc),
+            'sender': data['sender'],
+        }
+
+    def _parse_local_timestamp(self, value):
+        return datetime.datetime.strptime(
+            value, self.TIMESTAMP_FORMAT).replace(tzinfo=self.TIMEZONE)
+
+
+class PollenParser(HealthForecastParser):
+
+    FORECAST_DAY_KEYS = ['today', 'tomorrow', 'dayafter_to']
+    INDEX_SEVERITIES = {
+        '0': 0.,
+        '0-1': .5,
+        '1': 1.,
+        '1-2': 1.5,
+        '2': 2.,
+        '2-3': 2.5,
+        '3': 3.,
+    }
+
+    def parse_data(self, data):
+        meta = self.parse_metadata(data)
+        base_date = self._parse_local_timestamp(data['last_update']).date()
+        for region in data['content']:
+            yield from self.parse_region(region, base_date, meta)
+
+    def parse_region(self, region, base_date, meta):
+        for species, days in region['Pollen'].items():
+            for offset, day_key in enumerate(self.FORECAST_DAY_KEYS):
+                raw = days.get(day_key)
+                # '-1' marks missing values (see Beschreibung_pollen_s31fg)
+                if raw is None or raw == '-1':
+                    continue
+                severity = self.INDEX_SEVERITIES.get(raw)
+                if severity is None:
+                    self.logger.warning(
+                        "Unknown pollen index value %r for %s in %s",
+                        raw, species, region['region_name'])
+                yield {
+                    'region_id': region['region_id'],
+                    'partregion_id': region['partregion_id'],
+                    'region_name': region['region_name'],
+                    'partregion_name': region['partregion_name'] or None,
+                    'species': species.lower(),
+                    'date': base_date + datetime.timedelta(days=offset),
+                    'index': raw,
+                    'severity': severity,
+                    **meta,
+                }
+
+
 def get_parser(filename):
     parsers = {
         r'DE1200_RV': RADOLANParser,
         r'MOSMIX_': MOSMIXParser,
         r'Z__C_EDZW_\d+_.*\.json\.bz2$': SYNOPParser,
         r'Z_CAP_.*\.zip': CAPParser,
+        r's31fg\.json$': PollenParser,
         r'\w{5}-BEOB\.csv$': CurrentObservationsParser,
         'composite_rv_': RadarParser,
         'stundenwerte_FF_': WindObservationsParser,
