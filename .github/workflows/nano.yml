@@ -1,0 +1,31 @@
+# nano fork CI: tests for the nano-health branch (upstream's main.yml only
+# covers master and v* tags). Python edges only — upstream's full matrix runs
+# when a parser is offered as a PR there.
+name: nano CI
+
+on:
+  push:
+    branches: [ nano-health ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: 'requirements-dev.txt'
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt && pip install '.[all]'
+      - name: Lint
+        run: ruff check .
+      - name: Test
+        run: pytest
